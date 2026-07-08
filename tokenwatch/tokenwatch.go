@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ayush18pop/done/chainsync"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -37,10 +38,18 @@ func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint
 	if err != nil {
 		return err
 	}
+
+	finalizedBlock, err := chainsync.GetFinalizedBlock(client, ctx)
+	if err != nil {
+		return err
+	}
+
 	var builder strings.Builder
 
 	for _, vLog := range logs {
 		info := tokens[vLog.Address] // whichever token actually emitted this log, not a flat assumption
+
+		final := vLog.BlockNumber <= finalizedBlock
 
 		from := common.HexToAddress(vLog.Topics[1].Hex())
 		to := common.HexToAddress(vLog.Topics[2].Hex())
@@ -62,6 +71,7 @@ func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint
 		fmt.Fprintf(&builder, "To         : %s\n", to.Hex())
 		fmt.Fprintf(&builder, "Amount     : %s %s\n", humanAmount.FloatString(int(info.Decimals)), info.Symbol)
 		fmt.Fprintf(&builder, "Raw Amount : %s\n", amount.String())
+		fmt.Fprintf(&builder, "Final      : %t (finalized block: %d)\n", final, finalizedBlock)
 
 		builder.WriteString("\n------------------------------------------------------------\n\n")
 	}

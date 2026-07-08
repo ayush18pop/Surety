@@ -11,7 +11,20 @@ import (
 
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 )
+
+// GetFinalizedBlock returns the highest block number that Ethereum's consensus
+// layer has cryptoeconomically finalized, not a guessed confirmation count.
+// rpc.FinalizedBlockNumber is a negative sentinel (-3) that ethclient turns into
+// the literal "finalized" tag over JSON-RPC.
+func GetFinalizedBlock(client *ethclient.Client, ctx context.Context) (uint64, error) {
+	header, err := client.HeaderByNumber(ctx, big.NewInt(rpc.FinalizedBlockNumber.Int64()))
+	if err != nil {
+		return 0, err
+	}
+	return header.Number.Uint64(), nil
+}
 
 func ProcessBlock(client *ethclient.Client, ctx context.Context, blockNum uint64) error {
 	b, err := client.BlockByNumber(ctx, big.NewInt(int64(blockNum)))
