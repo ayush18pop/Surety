@@ -1,1 +1,7 @@
 .env
+.vscode/
+.claude/
+checkpoint.txt
+blockchain-indexer
+logs.txt
+usdc_transfers.txt
