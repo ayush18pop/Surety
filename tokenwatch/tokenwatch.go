@@ -13,15 +13,23 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-var usdc = common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+type TokenInfo struct {
+	Symbol   string
+	Decimals int64
+}
 
-func CheckUSDCTransfers(client *ethclient.Client, ctx context.Context, blockNum uint64) error {
+func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint64, tokens map[common.Address]TokenInfo) error {
 	transferSig := crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
+
+	addresses := make([]common.Address, 0, len(tokens))
+	for addr := range tokens {
+		addresses = append(addresses, addr)
+	}
 
 	query := ethereum.FilterQuery{
 		FromBlock: big.NewInt(int64(blockNum)),
 		ToBlock:   big.NewInt(int64(blockNum)),
-		Addresses: []common.Address{usdc},
+		Addresses: addresses,
 		Topics:    [][]common.Hash{{transferSig}},
 	}
 
@@ -32,25 +40,28 @@ func CheckUSDCTransfers(client *ethclient.Client, ctx context.Context, blockNum 
 	var builder strings.Builder
 
 	for _, vLog := range logs {
+		info := tokens[vLog.Address] // whichever token actually emitted this log, not a flat assumption
+
 		from := common.HexToAddress(vLog.Topics[1].Hex())
 		to := common.HexToAddress(vLog.Topics[2].Hex())
 
 		amount := new(big.Int).SetBytes(vLog.Data)
 
-		humanAmount := new(big.Rat).SetFrac(amount, big.NewInt(1_000_000))
+		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(info.Decimals), nil)
+		humanAmount := new(big.Rat).SetFrac(amount, divisor)
 
 		builder.WriteString("============================================================\n")
-		builder.WriteString("USDC Transfer\n")
+		fmt.Fprintf(&builder, "%s Transfer\n", info.Symbol)
 		builder.WriteString("============================================================\n")
 
-		builder.WriteString(fmt.Sprintf("Block      : %d\n", vLog.BlockNumber))
-		builder.WriteString(fmt.Sprintf("Tx Hash    : %s\n", vLog.TxHash.Hex()))
-		builder.WriteString(fmt.Sprintf("Log Index  : %d\n\n", vLog.Index))
+		fmt.Fprintf(&builder, "Block      : %d\n", vLog.BlockNumber)
+		fmt.Fprintf(&builder, "Tx Hash    : %s\n", vLog.TxHash.Hex())
+		fmt.Fprintf(&builder, "Log Index  : %d\n\n", vLog.Index)
 
-		builder.WriteString(fmt.Sprintf("From       : %s\n", from.Hex()))
-		builder.WriteString(fmt.Sprintf("To         : %s\n", to.Hex()))
-		builder.WriteString(fmt.Sprintf("Amount     : %s USDC\n", humanAmount.FloatString(6)))
-		builder.WriteString(fmt.Sprintf("Raw Amount : %s\n", amount.String()))
+		fmt.Fprintf(&builder, "From       : %s\n", from.Hex())
+		fmt.Fprintf(&builder, "To         : %s\n", to.Hex())
+		fmt.Fprintf(&builder, "Amount     : %s %s\n", humanAmount.FloatString(int(info.Decimals)), info.Symbol)
+		fmt.Fprintf(&builder, "Raw Amount : %s\n", amount.String())
 
 		builder.WriteString("\n------------------------------------------------------------\n\n")
 	}

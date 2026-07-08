@@ -9,9 +9,17 @@ import (
 
 	"github.com/ayush18pop/done/chainsync"
 	"github.com/ayush18pop/done/tokenwatch"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/joho/godotenv"
 )
+
+// watchedTokens maps each token contract to its symbol/decimals, a map, not a
+// slice, because tokenwatch needs to know which decimals apply to which token
+// when a batch of logs comes back from more than one contract at once.
+var watchedTokens = map[common.Address]tokenwatch.TokenInfo{
+	common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"): {Symbol: "USDC", Decimals: 6},
+}
 
 func main() {
 	if err := godotenv.Load(); err != nil {
@@ -51,8 +59,8 @@ func main() {
 				if err != nil {
 					log.Fatal(err)
 				}
-				if err := tokenwatch.CheckUSDCTransfers(client, ctx, blockNum); err != nil {
-					fmt.Println("CheckUSDCTransfers failed:", err)
+				if err := tokenwatch.CheckTransfers(client, ctx, blockNum, watchedTokens); err != nil {
+					fmt.Println("CheckTransfers failed:", err)
 				}
 				lastProcessed = blockNum
 				chainsync.SaveCheckpoint(lastProcessed, client, ctx)
