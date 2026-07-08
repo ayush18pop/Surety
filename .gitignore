@@ -2,6 +2,6 @@
 .vscode/
 .claude/
 checkpoint.txt
-blockchain-indexer
+done
 logs.txt
 usdc_transfers.txt
