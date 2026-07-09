@@ -7,3 +7,6 @@ done
 logs.txt
 usdc_transfers.txt
 *.db
+*.db-journal
+*.db-wal
+*.db-shm

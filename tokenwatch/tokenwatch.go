@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/ayush18pop/done/chainsync"
 	"github.com/ayush18pop/done/storage"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -19,7 +18,10 @@ type TokenInfo struct {
 	Decimals int64
 }
 
-func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint64, tokens map[common.Address]TokenInfo, db *sql.DB) error {
+// finalizedBlock is passed in rather than fetched here: the caller already
+// needs it once per polling tick, and looking it up again per block was an
+// extra RPC round-trip for a value that barely moves.
+func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint64, tokens map[common.Address]TokenInfo, db *sql.DB, finalizedBlock uint64) error {
 	transferSig := crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
 
 	addresses := make([]common.Address, 0, len(tokens))
@@ -35,11 +37,6 @@ func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint
 	}
 
 	logs, err := client.FilterLogs(ctx, query)
-	if err != nil {
-		return err
-	}
-
-	finalizedBlock, err := chainsync.GetFinalizedBlock(client, ctx)
 	if err != nil {
 		return err
 	}

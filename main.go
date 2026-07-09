@@ -62,6 +62,11 @@ func main() {
 			continue
 		}
 
+		finalizedBlock, err := chainsync.GetFinalizedBlock(client, ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		if latestNum > cp.BlockNumber {
 			fmt.Printf("Need to process blocks %d to %d\n", cp.BlockNumber+1, latestNum)
 			for blockNum := cp.BlockNumber + 1; blockNum <= latestNum; blockNum++ {
@@ -79,15 +84,41 @@ func main() {
 						"REORG DETECTED: block %d's parent is %s, but checkpoint expected %s (last processed: block %d)\n",
 						blockNum, parentHash, cp.BlockHash, cp.BlockNumber,
 					)
+
+					newCp, err := chainsync.HandleReorg(client, ctx, db, cp, finalizedBlock)
+					if err != nil {
+						log.Fatal(err)
+					}
+					fmt.Printf("rolled back to fork point: block %d\n", newCp.BlockNumber)
+
+					cp = newCp
+					chainsync.SaveCheckpoint(cp, client, ctx)
+					break // restart the catch-up from the fork point
 				}
 
-				if err := tokenwatch.CheckTransfers(client, ctx, blockNum, watchedTokens, db); err != nil {
-					fmt.Println("CheckTransfers failed:", err)
+				// Don't advance the checkpoint past a block whose transfers we
+				// failed to read - a transient RPC error would otherwise skip
+				// that block permanently. Leaving the checkpoint where it is
+				// means the next tick retries this same block, which the
+				// idempotent inserts make safe.
+				if err := tokenwatch.CheckTransfers(client, ctx, blockNum, watchedTokens, db, finalizedBlock); err != nil {
+					fmt.Printf("CheckTransfers failed on block %d, retrying next tick: %v\n", blockNum, err)
+					break
+				}
+				if err := storage.InsertBlock(db, blockNum, hash); err != nil {
+					log.Fatal(err)
 				}
 				cp = chainsync.Checkpoint{BlockNumber: blockNum, BlockHash: hash}
 				chainsync.SaveCheckpoint(cp, client, ctx)
 			}
 		}
+
+		// Finalized blocks can't reorg, so their hashes will never be compared
+		// against again.
+		if err := storage.PruneBlocksBelow(db, finalizedBlock); err != nil {
+			log.Fatal(err)
+		}
+
 		time.Sleep(12 * time.Second)
 
 	}

@@ -8,11 +8,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 
 ### Added
 - `tokenwatch.TokenInfo` (`Symbol`, `Decimals`) so watched tokens carry their own metadata instead of assuming USDC's shape everywhere.
+- SQLite persistence (`storage` package, `modernc.org/sqlite` — pure Go, no cgo): a `transfers` table keyed on `UNIQUE(tx_hash, log_index)`, replacing the overwrite-every-block text file.
+- `chainsync.GetFinalizedBlock` — real finality via the chain's `finalized` block tag, not a guessed confirmation depth.
+- Reorg detection: the checkpoint is now JSON carrying both a block number and hash, and each block's `ParentHash` is checked against it.
+- Reorg **correction**: a `blocks` table records one hash per height, `chainsync.FindForkPoint` walks backwards to the last height where our stored hash matches the live chain, and `chainsync.HandleReorg` discards everything above that fork point and resets the checkpoint to it. Bounded below by the finalized block, which cannot reorg.
+- `storage.PruneBlocksBelow` drops block hashes at or below finality, so the `blocks` table doesn't grow forever.
 
 ### Changed
 - `tokenwatch.CheckTransfers` now takes `map[common.Address]TokenInfo` instead of a single hardcoded USDC address — multiple tokens can be watched in one call, and each log is decoded using the decimals/symbol of whichever contract actually emitted it, not a flat assumption.
-- Output formatting (amount, decimals, label) is now driven by the matched token's `TokenInfo` instead of hardcoded USDC values.
-- Formatting internals switched from `builder.WriteString(fmt.Sprintf(...))` to `fmt.Fprintf(&builder, ...)` where formatting is actually happening.
+- `finalizedBlock` is fetched once per polling tick and passed down, rather than re-fetched on every block. `tokenwatch` no longer depends on `chainsync` as a result.
+
+### Fixed
+- A failed `CheckTransfers` no longer advances the checkpoint past the block it failed on. Previously a transient RPC error printed a warning and moved on, permanently skipping that block's transfers.
+- `LoadCheckpoint` no longer calls `log.Fatal` when the checkpoint file is missing — a fresh clone has no checkpoint yet, which is expected, not fatal.
+- `InsertTransfer` and `InsertBlock` use `INSERT OR REPLACE`. Re-processing a block is normal (crash mid-block, re-indexing after a reorg) and previously hit a constraint violation on the second pass.
 
 ## [0.3.0] - 2026-07-08
 
