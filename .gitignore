@@ -2,6 +2,8 @@
 .vscode/
 .claude/
 checkpoint.txt
+checkpoint.json
 done
 logs.txt
 usdc_transfers.txt
+*.db

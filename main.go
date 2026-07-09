@@ -37,33 +37,44 @@ func main() {
 
 	ctx := context.Background()
 
-	lastProcessed, err := chainsync.LoadCheckpoint("checkpoint.txt")
+	cp, err := chainsync.LoadCheckpoint("checkpoint.json")
 
 	if err != nil {
-		chainsync.SaveCheckpoint(0, client, ctx)
+		chainsync.SaveCheckpoint(chainsync.Checkpoint{}, client, ctx)
 	}
 
 	for {
 		latest, _ := client.BlockByNumber(ctx, nil)
 		latestNum := latest.NumberU64()
-		if lastProcessed == 0 {
-			lastProcessed = latestNum
+		if cp.BlockNumber == 0 {
+			cp.BlockNumber = latestNum
 			continue
 		}
 
-		if latestNum > lastProcessed {
-			fmt.Printf("Need to process blocks %d to %d\n", lastProcessed+1, latestNum)
-			for blockNum := lastProcessed + 1; blockNum <= latestNum; blockNum++ {
+		if latestNum > cp.BlockNumber {
+			fmt.Printf("Need to process blocks %d to %d\n", cp.BlockNumber+1, latestNum)
+			for blockNum := cp.BlockNumber + 1; blockNum <= latestNum; blockNum++ {
 				fmt.Println("Processing block:", blockNum)
-				err = chainsync.ProcessBlock(client, ctx, blockNum)
+				hash, parentHash, err := chainsync.ProcessBlock(client, ctx, blockNum)
 				if err != nil {
 					log.Fatal(err)
 				}
+
+				// cp.BlockHash is empty right after a fresh start (no prior
+				// block to compare against yet) - only check continuity once
+				// there's a real previous hash on record.
+				if cp.BlockHash != "" && parentHash != cp.BlockHash {
+					fmt.Printf(
+						"REORG DETECTED: block %d's parent is %s, but checkpoint expected %s (last processed: block %d)\n",
+						blockNum, parentHash, cp.BlockHash, cp.BlockNumber,
+					)
+				}
+
 				if err := tokenwatch.CheckTransfers(client, ctx, blockNum, watchedTokens); err != nil {
 					fmt.Println("CheckTransfers failed:", err)
 				}
-				lastProcessed = blockNum
-				chainsync.SaveCheckpoint(lastProcessed, client, ctx)
+				cp = chainsync.Checkpoint{BlockNumber: blockNum, BlockHash: hash}
+				chainsync.SaveCheckpoint(cp, client, ctx)
 			}
 		}
 		time.Sleep(12 * time.Second)

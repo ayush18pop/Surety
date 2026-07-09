@@ -2,17 +2,24 @@ package chainsync
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
 	"os"
-	"strconv"
 
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 )
+
+// Checkpoint is the two values needed to detect a reorg later: not just how
+// far we've processed, but the hash of the block we last trusted at that
+// position, so a future block's ParentHash can be checked against it.
+type Checkpoint struct {
+	BlockNumber uint64 `json:"block_number"`
+	BlockHash   string `json:"block_hash"`
+}
 
 // GetFinalizedBlock returns the highest block number that Ethereum's consensus
 // layer has cryptoeconomically finalized, not a guessed confirmation count.
@@ -26,10 +33,14 @@ func GetFinalizedBlock(client *ethclient.Client, ctx context.Context) (uint64, e
 	return header.Number.Uint64(), nil
 }
 
-func ProcessBlock(client *ethclient.Client, ctx context.Context, blockNum uint64) error {
+// ProcessBlock returns the block's own hash and its parent's hash, so callers
+// (the polling loop) can both save the checkpoint and check continuity
+// against the previously saved checkpoint without a second, wasted RPC call
+// to fetch a block they already have.
+func ProcessBlock(client *ethclient.Client, ctx context.Context, blockNum uint64) (hash string, parentHash string, err error) {
 	b, err := client.BlockByNumber(ctx, big.NewInt(int64(blockNum)))
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	fmt.Println("Block number:", b.Number())
 	fmt.Println("Block hash:", b.Hash())
@@ -41,7 +52,7 @@ func ProcessBlock(client *ethclient.Client, ctx context.Context, blockNum uint64
 			signer := types.LatestSignerForChainID(tx.ChainId())
 			from, err := types.Sender(signer, tx)
 			if err != nil {
-				return err
+				return "", "", err
 			}
 			fmt.Println("tx is form : ", from)
 			fmt.Println("chainid:", tx.ChainId())
@@ -49,7 +60,7 @@ func ProcessBlock(client *ethclient.Client, ctx context.Context, blockNum uint64
 			signer := types.HomesteadSigner{}
 			from, err := types.Sender(signer, tx)
 			if err != nil {
-				return err
+				return "", "", err
 			}
 			fmt.Println("tx is form : ", from)
 			fmt.Println("chainid:", tx.ChainId())
@@ -65,35 +76,44 @@ func ProcessBlock(client *ethclient.Client, ctx context.Context, blockNum uint64
 	fmt.Println("transactions : ")
 	fmt.Println("Gas used:", b.GasUsed())
 	fmt.Println("Gas limit:", b.GasLimit())
-	return nil
+	return b.Hash().Hex(), b.ParentHash().Hex(), nil
 }
 
-func LoadCheckpoint(fileName string) (uint64, error) {
-	checkpt, err := os.ReadFile(fileName)
+// LoadCheckpoint reads and parses the JSON checkpoint file. Unlike the old
+// version, a missing file returns an error instead of crashing the process —
+// a fresh checkout with no checkpoint.json yet is an expected, recoverable
+// case (main.go already handles it by seeding a new one via SaveCheckpoint),
+// not a fatal one.
+func LoadCheckpoint(fileName string) (Checkpoint, error) {
+	data, err := os.ReadFile(fileName)
 	if err != nil {
-		log.Fatal("failed to load checkpoint!")
+		return Checkpoint{}, err
 	}
-	if len(checkpt) == 0 {
-		return 0, fmt.Errorf("empty checkpoint file!")
+	if len(data) == 0 {
+		return Checkpoint{}, fmt.Errorf("empty checkpoint file!")
 	}
-	lastProcessed, err := strconv.ParseUint(string(checkpt), 10, 64)
-	return lastProcessed, err
+	var cp Checkpoint
+	if err := json.Unmarshal(data, &cp); err != nil {
+		return Checkpoint{}, err
+	}
+	return cp, nil
 }
 
-func SaveCheckpoint(pt uint64, client *ethclient.Client, ctx context.Context) error {
-	if pt == 0 {
-		b, _ := client.BlockByNumber(ctx, nil)
-		bnum := []byte(strconv.FormatUint(b.NumberU64(), 10))
-		err := os.WriteFile("checkpoint.txt", bnum, 0666)
+func SaveCheckpoint(cp Checkpoint, client *ethclient.Client, ctx context.Context) error {
+	if cp.BlockNumber == 0 {
+		b, err := client.BlockByNumber(ctx, nil)
 		if err != nil {
-			log.Fatal(errors.Join(fmt.Errorf("Write failed: "), err))
+			return err
 		}
-	} else {
-		data := []byte(strconv.FormatUint(pt, 10))
-		fileWriteErr := os.WriteFile("checkpoint.txt", data, 0666)
-		if fileWriteErr != nil {
-			log.Fatal(errors.Join(fmt.Errorf("Write failed: "), fileWriteErr))
-		}
+		cp = Checkpoint{BlockNumber: b.NumberU64(), BlockHash: b.Hash().Hex()}
+	}
+
+	data, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile("checkpoint.json", data, 0666); err != nil {
+		log.Fatal(fmt.Errorf("write failed: %w", err))
 	}
 
 	return nil
