@@ -2,12 +2,12 @@ package tokenwatch
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math/big"
-	"os"
-	"strings"
 
 	"github.com/ayush18pop/done/chainsync"
+	"github.com/ayush18pop/done/storage"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -19,7 +19,7 @@ type TokenInfo struct {
 	Decimals int64
 }
 
-func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint64, tokens map[common.Address]TokenInfo) error {
+func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint64, tokens map[common.Address]TokenInfo, db *sql.DB) error {
 	transferSig := crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
 
 	addresses := make([]common.Address, 0, len(tokens))
@@ -44,8 +44,6 @@ func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint
 		return err
 	}
 
-	var builder strings.Builder
-
 	for _, vLog := range logs {
 		info := tokens[vLog.Address] // whichever token actually emitted this log, not a flat assumption
 
@@ -56,29 +54,24 @@ func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint
 
 		amount := new(big.Int).SetBytes(vLog.Data)
 
-		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(info.Decimals), nil)
-		humanAmount := new(big.Rat).SetFrac(amount, divisor)
+		t := storage.Transfer{
+			BlockNumber: vLog.BlockNumber,
+			LogIndex:    vLog.Index,
+			TxHash:      vLog.TxHash.Hex(),
+			TokenSymbol: info.Symbol,
+			From:        from.Hex(),
+			To:          to.Hex(),
+			RawAmount:   amount.String(),
+			IsFinal:     final,
+		}
 
-		builder.WriteString("============================================================\n")
-		fmt.Fprintf(&builder, "%s Transfer\n", info.Symbol)
-		builder.WriteString("============================================================\n")
+		if err := storage.InsertTransfer(db, t); err != nil {
+			return err
+		}
 
-		fmt.Fprintf(&builder, "Block      : %d\n", vLog.BlockNumber)
-		fmt.Fprintf(&builder, "Tx Hash    : %s\n", vLog.TxHash.Hex())
-		fmt.Fprintf(&builder, "Log Index  : %d\n\n", vLog.Index)
-
-		fmt.Fprintf(&builder, "From       : %s\n", from.Hex())
-		fmt.Fprintf(&builder, "To         : %s\n", to.Hex())
-		fmt.Fprintf(&builder, "Amount     : %s %s\n", humanAmount.FloatString(int(info.Decimals)), info.Symbol)
-		fmt.Fprintf(&builder, "Raw Amount : %s\n", amount.String())
-		fmt.Fprintf(&builder, "Final      : %t (finalized block: %d)\n", final, finalizedBlock)
-
-		builder.WriteString("\n------------------------------------------------------------\n\n")
+		fmt.Printf("stored transfer: block %d, tx %s, log %d, %s %s -> %s, final=%t\n",
+			t.BlockNumber, t.TxHash, t.LogIndex, t.TokenSymbol, t.From, t.To, t.IsFinal)
 	}
 
-	err = os.WriteFile("usdc_transfers.txt", []byte(builder.String()), 0644)
-	if err != nil {
-		return err
-	}
 	return nil
 }

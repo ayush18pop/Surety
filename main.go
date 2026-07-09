@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ayush18pop/done/chainsync"
+	"github.com/ayush18pop/done/storage"
 	"github.com/ayush18pop/done/tokenwatch"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -34,6 +35,16 @@ func main() {
 		log.Fatal(err)
 	}
 	defer client.Close()
+
+	db, err := storage.Open("done.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := storage.InitSchema(db); err != nil {
+		log.Fatal(err)
+	}
 
 	ctx := context.Background()
 
@@ -70,7 +81,7 @@ func main() {
 					)
 				}
 
-				if err := tokenwatch.CheckTransfers(client, ctx, blockNum, watchedTokens); err != nil {
+				if err := tokenwatch.CheckTransfers(client, ctx, blockNum, watchedTokens, db); err != nil {
 					fmt.Println("CheckTransfers failed:", err)
 				}
 				cp = chainsync.Checkpoint{BlockNumber: blockNum, BlockHash: hash}
