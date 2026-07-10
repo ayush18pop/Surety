@@ -71,8 +71,8 @@ func main() {
 	}
 
 	for {
-		latest, _ := client.BlockByNumber(ctx, nil)
-		latestNum := latest.NumberU64()
+		latest, _ := client.HeaderByNumber(ctx, nil)
+		latestNum := latest.Number.Uint64()
 		if cp.BlockNumber == 0 {
 			cp.BlockNumber = latestNum
 			continue
