@@ -6,6 +6,7 @@ import (
 	"math/big"
 
 	"github.com/ayush18pop/surety/storage"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -22,6 +23,16 @@ func GetFinalizedBlock(client *ethclient.Client, ctx context.Context) (uint64, e
 	return header.Number.Uint64(), nil
 }
 
+// HeaderFetcher is the one method FindForkPoint actually calls on a chain
+// client. Depending on this instead of the concrete *ethclient.Client is what
+// makes FindForkPoint testable: a real mainnet reorg can't be triggered on
+// demand, so the test needs to fake the chain instead. *ethclient.Client
+// already has a method with this exact signature, so it satisfies this
+// interface with no changes needed at any real call site.
+type HeaderFetcher interface {
+	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
+}
+
 // FindForkPoint walks backwards from `from`, comparing the hash we recorded at
 // each height against the hash the live chain reports there now. The first
 // height where they agree is the fork point: the last block both chains share.
@@ -32,7 +43,7 @@ func GetFinalizedBlock(client *ethclient.Client, ctx context.Context) (uint64, e
 //
 // finalizedBlock is the floor, and it's a guarantee rather than a guess:
 // finalized blocks cannot reorg, so a match is certain at or before it.
-func FindForkPoint(client *ethclient.Client, ctx context.Context, db *sql.DB, from uint64, finalizedBlock uint64) (uint64, error) {
+func FindForkPoint(client HeaderFetcher, ctx context.Context, db *sql.DB, from uint64, finalizedBlock uint64) (uint64, error) {
 	if from <= finalizedBlock {
 		return from, nil // already at or below finality, nothing could have reorged
 	}

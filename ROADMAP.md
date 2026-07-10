@@ -13,11 +13,11 @@ Living status doc. Updated as things actually ship — checked off against real 
 - [x] SQLite persistence — `transfers`, `blocks`, and `checkpoint` all in one database, one transaction domain (`storage.RecordBlock`, `storage.Rollback` update multiple tables atomically, not as separate writes that can drift apart on a crash)
 - [x] Structured, leveled logging (`log/slog`) — no more `fmt.Println`
 - [x] Package split: `chainsync` (block/checkpoint/reorg), `storage` (persistence), `tokenwatch` (decoding), `main` (wiring only)
-- [x] 8 passing tests in `storage` covering idempotency, the reorg rollback, and checkpoint atomicity
+- [x] `FindForkPoint` is tested — a `HeaderFetcher` interface (just the one `HeaderByNumber` method it actually calls) lets a fake chain stand in, since real mainnet reorgs aren't triggerable on demand. Covers no-reorg, a shallow reorg, a reorg deeper than any stored history, and the already-at-finality early return.
+- [x] 12 passing tests: 8 in `storage` (idempotency, reorg rollback, checkpoint atomicity), 4 in `chainsync` (the fork-point walk)
 
 ## Known gaps (small, near-term)
 
-- [ ] **`FindForkPoint` has no test.** Needs a `HeaderFetcher` interface (just the one `HeaderByNumber` method it actually calls) so a fake chain can be injected — real mainnet reorgs aren't triggerable on demand, which is exactly why this needs a test more than most things here.
 - [ ] **Only USDC is configured.** The engine decodes any ERC-20 `Transfer`, but `watchedTokens` in `main.go` is a hardcoded map with one entry. No config file or flag to add a token without editing source and rebuilding.
 - [ ] **A reorg that doesn't advance the tip goes unnoticed.** The continuity check only runs inside `if latestNum > cp.BlockNumber`. If a reorg leaves the tip at or below the checkpoint, that block never gets re-fetched, so the check never fires.
 - [ ] **Bootstrap edge case in the continuity check.** `cp.BlockHash != ""` guards the very first comparison after a fresh start, since there's no prior hash to compare against yet. Works correctly, but it's a special case sitting in the main loop rather than handled structurally.
