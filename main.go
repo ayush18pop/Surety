@@ -70,8 +70,8 @@ func main() {
 		if latestNum > cp.BlockNumber {
 			fmt.Printf("Need to process blocks %d to %d\n", cp.BlockNumber+1, latestNum)
 			for blockNum := cp.BlockNumber + 1; blockNum <= latestNum; blockNum++ {
-				fmt.Println("Processing block:", blockNum)
-				hash, parentHash, err := chainsync.ProcessBlock(client, ctx, blockNum)
+				fmt.Println("processing block:", blockNum)
+				hash, parentHash, err := chainsync.GetBlockHashes(client, ctx, blockNum)
 				if err != nil {
 					log.Fatal(err)
 				}
