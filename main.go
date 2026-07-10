@@ -141,6 +141,18 @@ func main() {
 			fatal("pruning finalized blocks", err)
 		}
 
+		// is_final is only ever set once, when a transfer is first decoded -
+		// nothing else revisits it. Without this sweep, a transfer seen
+		// before it was finalized would stay marked final=false forever,
+		// even long after it's genuinely settled.
+		flipped, err := storage.MarkFinalized(db, finalizedBlock)
+		if err != nil {
+			fatal("marking transfers final", err)
+		}
+		if flipped > 0 {
+			slog.Info("marked transfers final", "count", flipped)
+		}
+
 		time.Sleep(12 * time.Second)
 
 	}

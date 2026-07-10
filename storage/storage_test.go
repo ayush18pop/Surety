@@ -268,3 +268,94 @@ func TestPruneBlocksBelow(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkFinalized(t *testing.T) {
+	db := newTestDB(t)
+
+	old := Transfer{
+		BlockNumber: 100,
+		LogIndex:    0,
+		TxHash:      "0xold",
+		TokenSymbol: "USDC",
+		From:        "0xfrom",
+		To:          "0xto",
+		RawAmount:   "1",
+		IsFinal:     false,
+	}
+	recent := Transfer{
+		BlockNumber: 200,
+		LogIndex:    0,
+		TxHash:      "0xrecent",
+		TokenSymbol: "USDC",
+		From:        "0xfrom",
+		To:          "0xto",
+		RawAmount:   "1",
+		IsFinal:     false,
+	}
+	if err := InsertTransfer(db, old); err != nil {
+		t.Fatalf("InsertTransfer(old) failed: %v", err)
+	}
+	if err := InsertTransfer(db, recent); err != nil {
+		t.Fatalf("InsertTransfer(recent) failed: %v", err)
+	}
+
+	// Finalized at 150: block 100 has caught up to finality, block 200 hasn't yet.
+	flipped, err := MarkFinalized(db, 150)
+	if err != nil {
+		t.Fatalf("MarkFinalized failed: %v", err)
+	}
+	if flipped != 1 {
+		t.Fatalf("got %d rows flipped, want 1 (only the block-100 transfer)", flipped)
+	}
+
+	var isFinal bool
+	if err := db.QueryRow(`SELECT is_final FROM transfers WHERE tx_hash = ?`, old.TxHash).Scan(&isFinal); err != nil {
+		t.Fatalf("reading back the old transfer failed: %v", err)
+	}
+	if !isFinal {
+		t.Fatal("block-100 transfer should now be marked final")
+	}
+
+	if err := db.QueryRow(`SELECT is_final FROM transfers WHERE tx_hash = ?`, recent.TxHash).Scan(&isFinal); err != nil {
+		t.Fatalf("reading back the recent transfer failed: %v", err)
+	}
+	if isFinal {
+		t.Fatal("block-200 transfer isn't finalized yet and must not have been flipped")
+	}
+}
+
+// A transfer already marked final shouldn't be counted again on a later
+// sweep - MarkFinalized only touches rows still marked is_final = 0.
+func TestMarkFinalizedIsNotRecountedOnRepeatSweep(t *testing.T) {
+	db := newTestDB(t)
+
+	tr := Transfer{
+		BlockNumber: 100,
+		LogIndex:    0,
+		TxHash:      "0xtx",
+		TokenSymbol: "USDC",
+		From:        "0xfrom",
+		To:          "0xto",
+		RawAmount:   "1",
+		IsFinal:     false,
+	}
+	if err := InsertTransfer(db, tr); err != nil {
+		t.Fatalf("InsertTransfer failed: %v", err)
+	}
+
+	first, err := MarkFinalized(db, 150)
+	if err != nil {
+		t.Fatalf("first MarkFinalized failed: %v", err)
+	}
+	if first != 1 {
+		t.Fatalf("got %d flipped on first sweep, want 1", first)
+	}
+
+	second, err := MarkFinalized(db, 200)
+	if err != nil {
+		t.Fatalf("second MarkFinalized failed: %v", err)
+	}
+	if second != 0 {
+		t.Fatalf("got %d flipped on second sweep, want 0 (already final, nothing left to do)", second)
+	}
+}

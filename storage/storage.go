@@ -189,3 +189,11 @@ func PruneBlocksBelow(db *sql.DB, finalizedBlock uint64) error {
 	_, err := db.Exec(`DELETE FROM blocks WHERE block_number <= ?`, finalizedBlock)
 	return err
 }
+
+func MarkFinalized(db *sql.DB, finalizedBlock uint64) (int64, error) {
+	res, err := db.Exec(`UPDATE transfers SET is_final = 1 WHERE is_final = 0 AND block_number <= ?`, finalizedBlock)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
