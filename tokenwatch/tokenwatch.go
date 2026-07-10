@@ -3,7 +3,7 @@ package tokenwatch
 import (
 	"context"
 	"database/sql"
-	"fmt"
+	"log/slog"
 	"math/big"
 
 	"github.com/ayush18pop/surety/storage"
@@ -66,8 +66,15 @@ func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint
 			return err
 		}
 
-		fmt.Printf("stored transfer: block %d, tx %s, log %d, %s %s -> %s, final=%t\n",
-			t.BlockNumber, t.TxHash, t.LogIndex, t.TokenSymbol, t.From, t.To, t.IsFinal)
+		slog.Info("stored transfer",
+			"block_number", t.BlockNumber,
+			"tx_hash", t.TxHash,
+			"log_index", t.LogIndex,
+			"token", t.TokenSymbol,
+			"from", t.From,
+			"to", t.To,
+			"final", t.IsFinal,
+		)
 	}
 
 	return nil

@@ -2,8 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -22,28 +21,40 @@ var watchedTokens = map[common.Address]tokenwatch.TokenInfo{
 	common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"): {Symbol: "USDC", Decimals: 6},
 }
 
+// fatal logs an error with context and exits. Only main() gets to do this -
+// everything below it returns errors instead of killing the process, since a
+// library function calling os.Exit takes that decision away from its caller.
+func fatal(msg string, err error) {
+	slog.Error(msg, "error", err)
+	os.Exit(1)
+}
+
 func main() {
+	// Text output for now - readable while actively developing. Swapping to
+	// JSON (for a log aggregator to parse) is this one line:
+	// slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+
 	if err := godotenv.Load(); err != nil {
-		log.Fatal(err)
+		fatal("loading .env", err)
 	}
 
 	rpcURL := os.Getenv("ETH_MAINNET_RPC")
 
 	client, err := ethclient.Dial(rpcURL)
-
 	if err != nil {
-		log.Fatal(err)
+		fatal("dialing RPC", err)
 	}
 	defer client.Close()
 
 	db, err := storage.Open("surety.db")
 	if err != nil {
-		log.Fatal(err)
+		fatal("opening database", err)
 	}
 	defer db.Close()
 
 	if err := storage.InitSchema(db); err != nil {
-		log.Fatal(err)
+		fatal("initializing schema", err)
 	}
 
 	ctx := context.Background()
@@ -64,32 +75,34 @@ func main() {
 
 		finalizedBlock, err := chainsync.GetFinalizedBlock(client, ctx)
 		if err != nil {
-			log.Fatal(err)
+			fatal("fetching finalized block", err)
 		}
 
 		if latestNum > cp.BlockNumber {
-			fmt.Printf("Need to process blocks %d to %d\n", cp.BlockNumber+1, latestNum)
+			slog.Info("catching up", "from_block", cp.BlockNumber+1, "to_block", latestNum)
 			for blockNum := cp.BlockNumber + 1; blockNum <= latestNum; blockNum++ {
-				fmt.Println("processing block:", blockNum)
+				slog.Debug("processing block", "block_number", blockNum)
 				hash, parentHash, err := chainsync.GetBlockHashes(client, ctx, blockNum)
 				if err != nil {
-					log.Fatal(err)
+					fatal("fetching block hashes", err)
 				}
 
 				// cp.BlockHash is empty right after a fresh start (no prior
 				// block to compare against yet) - only check continuity once
 				// there's a real previous hash on record.
 				if cp.BlockHash != "" && parentHash != cp.BlockHash {
-					fmt.Printf(
-						"REORG DETECTED: block %d's parent is %s, but checkpoint expected %s (last processed: block %d)\n",
-						blockNum, parentHash, cp.BlockHash, cp.BlockNumber,
+					slog.Warn("reorg detected",
+						"block_number", blockNum,
+						"got_parent_hash", parentHash,
+						"expected_parent_hash", cp.BlockHash,
+						"last_processed_block", cp.BlockNumber,
 					)
 
 					newCp, err := chainsync.HandleReorg(client, ctx, db, cp, finalizedBlock)
 					if err != nil {
-						log.Fatal(err)
+						fatal("handling reorg", err)
 					}
-					fmt.Printf("rolled back to fork point: block %d\n", newCp.BlockNumber)
+					slog.Info("rolled back to fork point", "block_number", newCp.BlockNumber)
 
 					cp = newCp
 					chainsync.SaveCheckpoint(cp, client, ctx)
@@ -102,11 +115,11 @@ func main() {
 				// means the next tick retries this same block, which the
 				// idempotent inserts make safe.
 				if err := tokenwatch.CheckTransfers(client, ctx, blockNum, watchedTokens, db, finalizedBlock); err != nil {
-					fmt.Printf("CheckTransfers failed on block %d, retrying next tick: %v\n", blockNum, err)
+					slog.Error("checking transfers, retrying next tick", "block_number", blockNum, "error", err)
 					break
 				}
 				if err := storage.InsertBlock(db, blockNum, hash); err != nil {
-					log.Fatal(err)
+					fatal("inserting block", err)
 				}
 				cp = chainsync.Checkpoint{BlockNumber: blockNum, BlockHash: hash}
 				chainsync.SaveCheckpoint(cp, client, ctx)
@@ -116,7 +129,7 @@ func main() {
 		// Finalized blocks can't reorg, so their hashes will never be compared
 		// against again.
 		if err := storage.PruneBlocksBelow(db, finalizedBlock); err != nil {
-			log.Fatal(err)
+			fatal("pruning finalized blocks", err)
 		}
 
 		time.Sleep(12 * time.Second)
