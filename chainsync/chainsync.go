@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"os"
 
-	"github.com/ayush18pop/done/storage"
+	"github.com/ayush18pop/surety/storage"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"

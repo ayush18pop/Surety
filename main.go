@@ -7,9 +7,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/ayush18pop/done/chainsync"
-	"github.com/ayush18pop/done/storage"
-	"github.com/ayush18pop/done/tokenwatch"
+	"github.com/ayush18pop/surety/chainsync"
+	"github.com/ayush18pop/surety/storage"
+	"github.com/ayush18pop/surety/tokenwatch"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/joho/godotenv"
@@ -36,7 +36,7 @@ func main() {
 	}
 	defer client.Close()
 
-	db, err := storage.Open("done.db")
+	db, err := storage.Open("surety.db")
 	if err != nil {
 		log.Fatal(err)
 	}

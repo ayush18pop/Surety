@@ -1,4 +1,4 @@
-module github.com/ayush18pop/done
+module github.com/ayush18pop/surety
 
 go 1.26.4
 

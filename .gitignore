@@ -4,6 +4,7 @@
 checkpoint.txt
 checkpoint.json
 done
+surety
 logs.txt
 usdc_transfers.txt
 *.db

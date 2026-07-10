@@ -1,4 +1,4 @@
-# Done
+# Surety
 
 A self-hosted indexer built specifically for **stablecoin payment settlement** — not a generic "watch any contract" tool. It watches stablecoin transfers and is working toward telling you the moment a payment is truly final and safe to act on, not just "seen" on-chain.
 
