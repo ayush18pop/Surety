@@ -136,7 +136,7 @@ func TestInsertBlockOverwritesSameHeight(t *testing.T) {
 	}
 }
 
-func TestDeleteAbove(t *testing.T) {
+func TestRollback(t *testing.T) {
 	db := newTestDB(t)
 
 	for _, n := range []uint64{100, 101, 102} {
@@ -156,19 +156,23 @@ func TestDeleteAbove(t *testing.T) {
 			t.Fatalf("InsertTransfer(%d) failed: %v", n, err)
 		}
 	}
+	// Simulate having already advanced the checkpoint to the (now stale) tip.
+	if err := RecordBlock(db, 102, "0xhash"); err != nil {
+		t.Fatalf("RecordBlock failed: %v", err)
+	}
 
 	// Fork point is 100, so 101 and 102 are stale and must go.
-	if err := DeleteAbove(db, 100); err != nil {
-		t.Fatalf("DeleteAbove failed: %v", err)
+	if err := Rollback(db, 100, "0xfork"); err != nil {
+		t.Fatalf("Rollback failed: %v", err)
 	}
 
 	for _, n := range []uint64{101, 102} {
 		if _, ok, _ := GetBlockHash(db, n); ok {
-			t.Fatalf("block %d survived DeleteAbove", n)
+			t.Fatalf("block %d survived Rollback", n)
 		}
 	}
 	if _, ok, _ := GetBlockHash(db, 100); !ok {
-		t.Fatal("block 100 is the fork point and must survive DeleteAbove")
+		t.Fatal("block 100 is the fork point and must survive Rollback")
 	}
 
 	var transfersLeft int
@@ -177,6 +181,65 @@ func TestDeleteAbove(t *testing.T) {
 	}
 	if transfersLeft != 1 {
 		t.Fatalf("got %d transfers left, want 1 (only the fork-point block's)", transfersLeft)
+	}
+
+	// The checkpoint must move back too, atomically with the deletes - not
+	// still point at 102, which no longer exists.
+	blockNumber, blockHash, found, err := LoadCheckpoint(db)
+	if err != nil {
+		t.Fatalf("LoadCheckpoint failed: %v", err)
+	}
+	if !found || blockNumber != 100 || blockHash != "0xfork" {
+		t.Fatalf("got (block=%d, hash=%q, found=%v), want (block=100, hash=%q, found=true)", blockNumber, blockHash, found, "0xfork")
+	}
+}
+
+func TestLoadCheckpointOnFreshDB(t *testing.T) {
+	db := newTestDB(t)
+
+	_, _, found, err := LoadCheckpoint(db)
+	if err != nil {
+		t.Fatalf("LoadCheckpoint failed: %v", err)
+	}
+	if found {
+		t.Fatal("got found=true on a database that has never recorded a block")
+	}
+}
+
+func TestRecordBlockUpdatesCheckpointAtomically(t *testing.T) {
+	db := newTestDB(t)
+
+	if err := RecordBlock(db, 100, "0xaaa"); err != nil {
+		t.Fatalf("RecordBlock failed: %v", err)
+	}
+
+	hash, ok, err := GetBlockHash(db, 100)
+	if err != nil {
+		t.Fatalf("GetBlockHash failed: %v", err)
+	}
+	if !ok || hash != "0xaaa" {
+		t.Fatalf("block row: got (%q, %v), want (%q, true)", hash, ok, "0xaaa")
+	}
+
+	blockNumber, blockHash, found, err := LoadCheckpoint(db)
+	if err != nil {
+		t.Fatalf("LoadCheckpoint failed: %v", err)
+	}
+	if !found || blockNumber != 100 || blockHash != "0xaaa" {
+		t.Fatalf("checkpoint: got (block=%d, hash=%q, found=%v), want (block=100, hash=%q, found=true)", blockNumber, blockHash, found, "0xaaa")
+	}
+
+	// A second block must advance the checkpoint, not add a second row -
+	// CHECK(id = 1) is what enforces that at the schema level.
+	if err := RecordBlock(db, 101, "0xbbb"); err != nil {
+		t.Fatalf("second RecordBlock failed: %v", err)
+	}
+	blockNumber, blockHash, _, err = LoadCheckpoint(db)
+	if err != nil {
+		t.Fatalf("LoadCheckpoint failed: %v", err)
+	}
+	if blockNumber != 101 || blockHash != "0xbbb" {
+		t.Fatalf("got (block=%d, hash=%q), want (block=101, hash=%q)", blockNumber, blockHash, "0xbbb")
 	}
 }
 

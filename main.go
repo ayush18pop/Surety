@@ -59,10 +59,15 @@ func main() {
 
 	ctx := context.Background()
 
-	cp, err := chainsync.LoadCheckpoint("checkpoint.json")
-
+	blockNumber, blockHash, found, err := storage.LoadCheckpoint(db)
 	if err != nil {
-		chainsync.SaveCheckpoint(chainsync.Checkpoint{}, client, ctx)
+		fatal("loading checkpoint", err)
+	}
+	cp := chainsync.Checkpoint{BlockNumber: blockNumber, BlockHash: blockHash}
+	if !found {
+		// Fresh database, never recorded a block: BlockNumber stays 0, which
+		// the loop below reads as "seed from the current chain tip."
+		slog.Info("no checkpoint found, starting from the current chain tip")
 	}
 
 	for {
@@ -98,6 +103,9 @@ func main() {
 						"last_processed_block", cp.BlockNumber,
 					)
 
+					// HandleReorg's Rollback already moves the checkpoint back
+					// to the fork point atomically, in the same transaction as
+					// the deletes - nothing further to save here.
 					newCp, err := chainsync.HandleReorg(client, ctx, db, cp, finalizedBlock)
 					if err != nil {
 						fatal("handling reorg", err)
@@ -105,7 +113,6 @@ func main() {
 					slog.Info("rolled back to fork point", "block_number", newCp.BlockNumber)
 
 					cp = newCp
-					chainsync.SaveCheckpoint(cp, client, ctx)
 					break // restart the catch-up from the fork point
 				}
 
@@ -118,11 +125,13 @@ func main() {
 					slog.Error("checking transfers, retrying next tick", "block_number", blockNum, "error", err)
 					break
 				}
-				if err := storage.InsertBlock(db, blockNum, hash); err != nil {
-					fatal("inserting block", err)
+				// RecordBlock writes the block hash and advances the checkpoint
+				// in one transaction - a crash between the two would otherwise
+				// leave them disagreeing about how far we've actually gotten.
+				if err := storage.RecordBlock(db, blockNum, hash); err != nil {
+					fatal("recording block", err)
 				}
 				cp = chainsync.Checkpoint{BlockNumber: blockNum, BlockHash: hash}
-				chainsync.SaveCheckpoint(cp, client, ctx)
 			}
 		}
 

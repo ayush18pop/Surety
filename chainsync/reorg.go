@@ -58,22 +58,21 @@ func FindForkPoint(client *ethclient.Client, ctx context.Context, db *sql.DB, fr
 	return finalizedBlock, nil
 }
 
-// HandleReorg finds the fork point, discards everything above it, and returns
-// the checkpoint to resume from. The caller re-indexes forward from there on
-// the now-canonical chain.
+// HandleReorg finds the fork point, discards everything above it (and moves
+// the checkpoint back to it, atomically with those deletes), and returns the
+// checkpoint to resume from. The caller re-indexes forward from there on the
+// now-canonical chain.
 func HandleReorg(client *ethclient.Client, ctx context.Context, db *sql.DB, cp Checkpoint, finalizedBlock uint64) (Checkpoint, error) {
 	forkPoint, err := FindForkPoint(client, ctx, db, cp.BlockNumber, finalizedBlock)
 	if err != nil {
 		return Checkpoint{}, err
 	}
 
-	if err := storage.DeleteAbove(db, forkPoint); err != nil {
-		return Checkpoint{}, err
-	}
-
 	// The fork point's hash usually comes straight from our own table, but it
 	// may have been pruned (it can be the finalized block itself), so fall
-	// back to asking the chain.
+	// back to asking the chain. This has to happen before Rollback, since
+	// Rollback needs the hash to write the new checkpoint in the same
+	// transaction as the deletes.
 	hash, ok, err := storage.GetBlockHash(db, forkPoint)
 	if err != nil {
 		return Checkpoint{}, err
@@ -84,6 +83,10 @@ func HandleReorg(client *ethclient.Client, ctx context.Context, db *sql.DB, cp C
 			return Checkpoint{}, err
 		}
 		hash = header.Hash().Hex()
+	}
+
+	if err := storage.Rollback(db, forkPoint, hash); err != nil {
+		return Checkpoint{}, err
 	}
 
 	return Checkpoint{BlockNumber: forkPoint, BlockHash: hash}, nil

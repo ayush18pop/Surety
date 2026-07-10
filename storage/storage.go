@@ -30,6 +30,15 @@ func Open(path string) (*sql.DB, error) {
 // fork point. Only heights above the finalized block need to be kept -
 // finalized blocks can't reorg - so this table gets pruned, not grown
 // forever.
+//
+// checkpoint: a single row (CHECK(id = 1) enforces that at the schema level)
+// holding how far we've processed. It has to live here, in the same database
+// as blocks/transfers, rather than in a separate file - a separate file can
+// never be updated in the same transaction as the data it's tracking progress
+// against, which is exactly the crash window that matters most (a reorg
+// rollback that deletes rows but doesn't also move the checkpoint back).
+// It also can't just be derived from MAX(block_number) in blocks, since
+// PruneBlocksBelow empties that table out once everything is finalized.
 func InitSchema(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS transfers (
@@ -49,6 +58,12 @@ func InitSchema(db *sql.DB) error {
 
 		CREATE TABLE IF NOT EXISTS blocks (
 			block_number INTEGER PRIMARY KEY,
+			block_hash TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS checkpoint (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			block_number INTEGER NOT NULL,
 			block_hash TEXT NOT NULL
 		);
 	`)
@@ -89,6 +104,41 @@ func InsertBlock(db *sql.DB, blockNumber uint64, blockHash string) error {
 	return err
 }
 
+// RecordBlock atomically records a processed block's hash and advances the
+// checkpoint to it, in one transaction. Doing these as two separate calls
+// would leave a window where a crash records the block but not the
+// checkpoint (or vice versa) - the two would drift out of sync exactly when
+// it matters most, on an unclean shutdown.
+func RecordBlock(db *sql.DB, blockNumber uint64, blockHash string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO blocks (block_number, block_hash) VALUES (?, ?)`, blockNumber, blockHash); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO checkpoint (id, block_number, block_hash) VALUES (1, ?, ?)`, blockNumber, blockHash); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// LoadCheckpoint returns how far processing has gotten. found is false only
+// on a fresh database that has never recorded a block yet - the caller
+// should seed a starting point (typically the current chain tip) itself.
+func LoadCheckpoint(db *sql.DB) (blockNumber uint64, blockHash string, found bool, err error) {
+	err = db.QueryRow(`SELECT block_number, block_hash FROM checkpoint WHERE id = 1`).Scan(&blockNumber, &blockHash)
+	if err == sql.ErrNoRows {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, err
+	}
+	return blockNumber, blockHash, true, nil
+}
+
 // GetBlockHash returns the hash recorded at a height. The bool reports
 // whether a row existed - a missing height is a normal case (pruned below
 // finality, or never seen), not an error.
@@ -104,24 +154,29 @@ func GetBlockHash(db *sql.DB, blockNumber uint64) (string, bool, error) {
 	return hash, true, nil
 }
 
-// DeleteAbove removes stale transfers and block hashes left behind by an
-// orphaned branch. blockNumber is the fork point - the last height both
-// chains agree on - so everything strictly above it is discarded.
+// Rollback discards stale transfers and block hashes left behind by an
+// orphaned branch, and resets the checkpoint to the fork point, all in one
+// transaction. forkPoint is the last height both chains agree on (from
+// chainsync.FindForkPoint) - everything strictly above it is discarded.
 //
-// Both deletes run in one transaction: a crash between them would otherwise
-// leave transfers from a dead branch sitting in the table with no block
-// hashes to catch them next time.
-func DeleteAbove(db *sql.DB, blockNumber uint64) error {
+// The checkpoint reset has to be part of the same transaction as the
+// deletes, not a follow-up call - a crash between "deleted the stale rows"
+// and "moved the checkpoint back" would leave the checkpoint pointing past
+// data that no longer exists, which is worse than not rolling back at all.
+func Rollback(db *sql.DB, forkPoint uint64, forkPointHash string) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`DELETE FROM transfers WHERE block_number > ?`, blockNumber); err != nil {
+	if _, err := tx.Exec(`DELETE FROM transfers WHERE block_number > ?`, forkPoint); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM blocks WHERE block_number > ?`, blockNumber); err != nil {
+	if _, err := tx.Exec(`DELETE FROM blocks WHERE block_number > ?`, forkPoint); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO checkpoint (id, block_number, block_hash) VALUES (1, ?, ?)`, forkPoint, forkPointHash); err != nil {
 		return err
 	}
 	return tx.Commit()
