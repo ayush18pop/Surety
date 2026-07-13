@@ -5,9 +5,9 @@
 [![Self-Hosted](https://img.shields.io/badge/deployment-self--hosted-blue)](#why-self-hosted-not-a-hosted-api)
 [![License](https://img.shields.io/badge/license-MIT%20(pending)-lightgrey)](#license)
 
-A self-hosted indexer built specifically for **stablecoin payment settlement** — not a generic "watch any contract" tool. It watches stablecoin transfers and is working toward telling you the moment a payment is truly final and safe to act on, not just "seen" on-chain.
+**The third option for stablecoin payment settlement.** Not "build reorg-safe finality tracking yourself" (tedious, easy to get subtly wrong). Not "trust a hosted API with your settlement-critical data" (fast, but now someone else's uptime is your uptime). Surety is that correctness work — done, tested, self-hosted — for teams who want to own their infra without building it from zero.
 
-Run it yourself, next to your own systems, pointed at your own RPC endpoint or your own Ethereum node. Nothing about this is hosted or SaaS — it's a package you install and run on your own infra, because it's watching money move for your business, and you shouldn't have to trust a third party's uptime or hand them the list of addresses you're watching.
+It watches stablecoin transfers, tells you the moment a payment is truly final and safe to act on (not just "seen"), and fires a signed webhook when it does. Run it next to your own systems, pointed at your own RPC endpoint. Nothing here is hosted or SaaS.
 
 > [!NOTE]
 > **Early, and building in public.** [ROADMAP.md](ROADMAP.md) tracks what's actually done vs. planned, checked off against real commits and tests — trust it over this page's pitch if the two ever disagree.
@@ -15,12 +15,13 @@ Run it yourself, next to your own systems, pointed at your own RPC endpoint or y
 ## What it does today
 
 - Polls new blocks and decodes ERC-20 `Transfer` events for the tokens you configure
+- Tracks real finality off the chain's own `finalized` RPC tag — a protocol-level guarantee, not a guessed confirmation depth
 - Detects reorgs and recovers from them — walks back to the last block both chains agree on, atomically
-- Tracks real finality off the chain's own `finalized` RPC tag, not a guessed confirmation depth
+- Fires a signed webhook (HMAC-SHA256, with retry on delivery failure) the moment a transfer reaches final status
 - Persists everything to a local SQLite file; crash-safe across restarts, no reprocessing or skipped blocks
-- Sends a signed webhook (HMAC-SHA256) when a transfer reaches final status, with automatic retry on delivery failure
+- Backed by tests that simulate reorgs on a fake chain rather than hoping mainnet never disagrees with the logic
 
-See [ROADMAP.md](ROADMAP.md) for known gaps and what's planned next.
+See [ROADMAP.md](ROADMAP.md) for known gaps and what's planned next — the query API is the current focus.
 
 ## Why stablecoins specifically, not any token
 
@@ -28,7 +29,7 @@ With a stablecoin, the amount transferred *is* the value — no price oracle, no
 
 ## Why self-hosted, not a hosted API
 
-Building payment-settlement infra yourself means getting reorg detection and recovery, real finality (not confirmation-counting), and crash-safe atomic writes right — tedious, easy-to-get-subtly-wrong work. Using a hosted indexer (Alchemy, Moralis, etc.) skips that work, but now the thing telling you a payment is safe to act on is a third party's uptime, pricing, and roadmap. Surety is the third option: that correctness work, aimed squarely at stablecoin settlement, self-hosted so you own the infra instead of depending on someone else's API for it.
+Building payment-settlement infra yourself means getting reorg detection and recovery, real finality (not confirmation-counting), and crash-safe atomic writes right — tedious, easy-to-get-subtly-wrong work, the kind that even teams processing billions of transactions across 100+ chains write engineering blog posts about because it's genuinely hard to do correctly. Using a hosted indexer (Alchemy, Moralis, etc.) skips that work, but now the thing telling you a payment is safe to act on is a third party's uptime, pricing, and roadmap.
 
 This tool never generates or holds private keys — it *registers* addresses you already control and watches them. No custody, no key management, no liability for someone else's funds. It's a watcher/notifier, deliberately scoped, not a wallet.
 
@@ -57,14 +58,14 @@ WEBHOOK_SECRET=<shared secret for HMAC-SHA256 signing>
 go run .
 ```
 
-It'll start polling from the current chain tip, watch for new blocks, and record decoded USDC transfers into a local `surety.db` SQLite file as they're found. Structured logs print to stdout as it runs (`log/slog`, human-readable by default).
+It starts polling from the current chain tip, watches for new blocks, and records decoded USDC transfers into a local `surety.db` SQLite file as they're found. Structured logs print to stdout as it runs (`log/slog`, human-readable by default).
 
-An HTTP server also comes up on `:8080` alongside it (`GET /health` for now — the data query endpoints are still on [ROADMAP.md](ROADMAP.md)). If `WEBHOOK_URL` is set, a signed POST fires at that URL every time a transfer reaches final status; leaving it unset disables delivery entirely rather than sending nowhere.
+An HTTP server comes up on `:8080` alongside it (`GET /health` for now — data query endpoints are on [ROADMAP.md](ROADMAP.md)). If `WEBHOOK_URL` is set, a signed POST fires at that URL every time a transfer reaches final status; leaving it unset disables delivery entirely rather than sending nowhere.
 
 ## Explicit non-goals
 
 - **No custody or key management.** This registers addresses, it never generates or holds private keys.
-- **No compliance/sanctions screening implementation.** The pipeline will have a clearly documented hook point for where a screening check would plug in, but wiring up a real provider (Chainalysis, TRM, etc.) is out of scope for this project.
+- **No compliance/sanctions screening implementation.** The pipeline has a documented hook point for where a screening check would plug in, but wiring up a real provider (Chainalysis, TRM, etc.) is out of scope for this project.
 - **No support for volatile or non-stablecoin assets.** See "why stablecoins" above — this is a deliberate, permanent scope boundary, not a temporary limitation.
 
 ## Contributing
@@ -73,7 +74,7 @@ This is early and actively changing. [ROADMAP.md](ROADMAP.md) tracks what's done
 
 ## License
 
-MIT (or will be, once formally added) — self-hostable, no restrictions on running this as part of your own infrastructure.
+MIT — see [LICENSE](LICENSE).
 
 ---
 
