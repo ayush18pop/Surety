@@ -29,6 +29,10 @@ This tool never generates or holds private keys — it *registers* addresses you
 ```bash
 # .env
 ETH_MAINNET_RPC=<your RPC endpoint>
+
+# optional - only needed if you want payment-status notifications
+WEBHOOK_URL=<url to receive signed POSTs>
+WEBHOOK_SECRET=<shared secret for HMAC-SHA256 signing>
 ```
 
 ```bash
@@ -36,6 +40,8 @@ go run .
 ```
 
 It'll start polling from the current chain tip, watch for new blocks, and record decoded USDC transfers into a local `surety.db` SQLite file as they're found. Structured logs print to stdout as it runs (`log/slog`, human-readable by default).
+
+An HTTP server also comes up on `:8080` alongside it (`GET /health` for now — the data query endpoints are still on [ROADMAP.md](ROADMAP.md)). If `WEBHOOK_URL` is set, a signed POST fires at that URL every time a transfer reaches final status; leaving it unset disables delivery entirely rather than sending nowhere.
 
 ## License
 
