@@ -359,3 +359,78 @@ func TestMarkFinalizedIsNotRecountedOnRepeatSweep(t *testing.T) {
 		t.Fatalf("got %d flipped on second sweep, want 0 (already final, nothing left to do)", second)
 	}
 }
+
+func TestGetUnnotifiedFinalTransfers(t *testing.T) {
+	db := newTestDB(t)
+
+	finalNotNotified := Transfer{
+		BlockNumber: 100, LogIndex: 0, TxHash: "0xfinal-unnotified",
+		TokenSymbol: "USDC", From: "0xfrom", To: "0xto", RawAmount: "1", IsFinal: true,
+	}
+	notFinal := Transfer{
+		BlockNumber: 200, LogIndex: 0, TxHash: "0xnot-final",
+		TokenSymbol: "USDC", From: "0xfrom", To: "0xto", RawAmount: "1", IsFinal: false,
+	}
+	if err := InsertTransfer(db, finalNotNotified); err != nil {
+		t.Fatalf("InsertTransfer(finalNotNotified) failed: %v", err)
+	}
+	if err := InsertTransfer(db, notFinal); err != nil {
+		t.Fatalf("InsertTransfer(notFinal) failed: %v", err)
+	}
+
+	// A final transfer that's already been notified about shouldn't come
+	// back either - insert it final, then mark it sent.
+	finalAlreadyNotified := Transfer{
+		BlockNumber: 300, LogIndex: 0, TxHash: "0xfinal-already-notified",
+		TokenSymbol: "USDC", From: "0xfrom", To: "0xto", RawAmount: "1", IsFinal: true,
+	}
+	if err := InsertTransfer(db, finalAlreadyNotified); err != nil {
+		t.Fatalf("InsertTransfer(finalAlreadyNotified) failed: %v", err)
+	}
+	if err := MarkWebhookSent(db, finalAlreadyNotified.TxHash, finalAlreadyNotified.LogIndex); err != nil {
+		t.Fatalf("MarkWebhookSent failed: %v", err)
+	}
+
+	got, err := GetUnnotifiedFinalTransfers(db)
+	if err != nil {
+		t.Fatalf("GetUnnotifiedFinalTransfers failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d transfers, want 1 (only the final-and-unnotified one)", len(got))
+	}
+	if got[0].TxHash != finalNotNotified.TxHash {
+		t.Fatalf("got tx hash %q, want %q", got[0].TxHash, finalNotNotified.TxHash)
+	}
+}
+
+func TestMarkWebhookSent_RemovesFromUnnotifiedList(t *testing.T) {
+	db := newTestDB(t)
+
+	tr := Transfer{
+		BlockNumber: 100, LogIndex: 5, TxHash: "0xtx",
+		TokenSymbol: "USDC", From: "0xfrom", To: "0xto", RawAmount: "1", IsFinal: true,
+	}
+	if err := InsertTransfer(db, tr); err != nil {
+		t.Fatalf("InsertTransfer failed: %v", err)
+	}
+
+	before, err := GetUnnotifiedFinalTransfers(db)
+	if err != nil {
+		t.Fatalf("GetUnnotifiedFinalTransfers failed: %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("got %d unnotified before marking sent, want 1", len(before))
+	}
+
+	if err := MarkWebhookSent(db, tr.TxHash, tr.LogIndex); err != nil {
+		t.Fatalf("MarkWebhookSent failed: %v", err)
+	}
+
+	after, err := GetUnnotifiedFinalTransfers(db)
+	if err != nil {
+		t.Fatalf("GetUnnotifiedFinalTransfers failed: %v", err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("got %d unnotified after marking sent, want 0", len(after))
+	}
+}

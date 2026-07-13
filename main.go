@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 
 	"github.com/ayush18pop/surety/chainsync"
+	"github.com/ayush18pop/surety/server"
 	"github.com/ayush18pop/surety/storage"
 	"github.com/ayush18pop/surety/tokenwatch"
+	"github.com/ayush18pop/surety/webhooks"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/joho/godotenv"
@@ -41,6 +44,12 @@ func main() {
 
 	rpcURL := os.Getenv("ETH_MAINNET_RPC")
 
+	// Webhooks are optional - not everyone self-hosting this wants a callback
+	// URL. An empty webhookURL disables delivery entirely rather than sending
+	// to nowhere.
+	webhookURL := os.Getenv("WEBHOOK_URL")
+	webhookSecret := os.Getenv("WEBHOOK_SECRET")
+
 	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		fatal("dialing RPC", err)
@@ -69,6 +78,21 @@ func main() {
 		// the loop below reads as "seed from the current chain tip."
 		slog.Info("no checkpoint found, starting from the current chain tip")
 	}
+
+	// Just a health check for now - the real query endpoints (GET /transfers
+	// and friends) are still on the roadmap. Runs in its own goroutine since
+	// the polling loop below never returns; a server error is still fatal,
+	// just reported from wherever it happens to occur.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	go func() {
+		if err := server.Run(":8080", mux); err != nil {
+			fatal("http server stopped", err)
+		}
+	}()
+	slog.Info("http server listening", "addr", ":8080")
 
 	for {
 		latest, _ := client.HeaderByNumber(ctx, nil)
@@ -151,6 +175,27 @@ func main() {
 		}
 		if flipped > 0 {
 			slog.Info("marked transfers final", "count", flipped)
+		}
+
+		if webhookURL != "" {
+			pending, err := storage.GetUnnotifiedFinalTransfers(db)
+			if err != nil {
+				fatal("loading unnotified final transfers", err)
+			}
+			for _, t := range pending {
+				if err := webhooks.SendPaymentStatus(webhookURL, webhookSecret, t); err != nil {
+					// Not fatal, and left unmarked: GetUnnotifiedFinalTransfers
+					// will return this same transfer again next tick, so a
+					// transient failure (receiver briefly down, network blip)
+					// retries on its own instead of losing the notification.
+					slog.Error("sending webhook, retrying next tick", "tx_hash", t.TxHash, "log_index", t.LogIndex, "error", err)
+					continue
+				}
+				if err := storage.MarkWebhookSent(db, t.TxHash, t.LogIndex); err != nil {
+					fatal("marking webhook sent", err)
+				}
+				slog.Info("sent payment status webhook", "tx_hash", t.TxHash, "log_index", t.LogIndex)
+			}
 		}
 
 		time.Sleep(12 * time.Second)
