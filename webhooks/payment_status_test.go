@@ -42,7 +42,7 @@ func TestSendPaymentStatus(t *testing.T) {
 		RawAmount:   "500000000",
 	}
 
-	if err := SendPaymentStatus(receiver.URL, secret, tr); err != nil {
+	if err := SendPaymentStatus(receiver.URL, secret, tr, StatusFinal); err != nil {
 		t.Fatalf("SendPaymentStatus failed: %v", err)
 	}
 
@@ -55,7 +55,7 @@ func TestSendPaymentStatus(t *testing.T) {
 		t.Fatalf("unmarshaling received body failed: %v", err)
 	}
 	want := PaymentStatusPayload{
-		Status:      "final",
+		Status:      StatusFinal,
 		BlockNumber: tr.BlockNumber,
 		TxHash:      tr.TxHash,
 		LogIndex:    tr.LogIndex,
@@ -87,8 +87,38 @@ func TestSendPaymentStatus_NonSuccessStatusIsAnError(t *testing.T) {
 	}))
 	defer receiver.Close()
 
-	err := SendPaymentStatus(receiver.URL, "secret", storage.Transfer{})
+	err := SendPaymentStatus(receiver.URL, "secret", storage.Transfer{}, StatusFinal)
 	if err == nil {
 		t.Fatal("got nil error, want an error since the receiver returned 500")
+	}
+}
+
+// The status genuinely has to flow through, not just be accepted and
+// ignored - each of the three real statuses gets its own delivery loop in
+// main.go, so a receiver needs to be able to tell them apart.
+func TestSendPaymentStatus_StatusFlowsIntoPayload(t *testing.T) {
+	for _, status := range []Status{StatusSeen, StatusSafe, StatusFinal} {
+		var gotBody []byte
+		receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var err error
+			gotBody, err = io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("reading request body failed: %v", err)
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		if err := SendPaymentStatus(receiver.URL, "secret", storage.Transfer{TxHash: "0xtx"}, status); err != nil {
+			t.Fatalf("SendPaymentStatus(%s) failed: %v", status, err)
+		}
+		receiver.Close()
+
+		var payload PaymentStatusPayload
+		if err := json.Unmarshal(gotBody, &payload); err != nil {
+			t.Fatalf("unmarshaling received body failed: %v", err)
+		}
+		if payload.Status != status {
+			t.Fatalf("got status %q, want %q", payload.Status, status)
+		}
 	}
 }

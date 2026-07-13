@@ -50,11 +50,11 @@ func TestInsertAndReadBack(t *testing.T) {
 
 	var got Transfer
 	row := db.QueryRow(`
-		SELECT block_number, log_index, tx_hash, token_symbol, from_address, to_address, raw_amount, is_final
+		SELECT block_number, log_index, tx_hash, token_symbol, from_address, to_address, raw_amount, is_safe, is_final
 		FROM transfers WHERE tx_hash = ? AND log_index = ?
 	`, want.TxHash, want.LogIndex)
 
-	if err := row.Scan(&got.BlockNumber, &got.LogIndex, &got.TxHash, &got.TokenSymbol, &got.From, &got.To, &got.RawAmount, &got.IsFinal); err != nil {
+	if err := row.Scan(&got.BlockNumber, &got.LogIndex, &got.TxHash, &got.TokenSymbol, &got.From, &got.To, &got.RawAmount, &got.IsSafe, &got.IsFinal); err != nil {
 		t.Fatalf("reading back the inserted row failed: %v", err)
 	}
 
@@ -387,8 +387,8 @@ func TestGetUnnotifiedFinalTransfers(t *testing.T) {
 	if err := InsertTransfer(db, finalAlreadyNotified); err != nil {
 		t.Fatalf("InsertTransfer(finalAlreadyNotified) failed: %v", err)
 	}
-	if err := MarkWebhookSent(db, finalAlreadyNotified.TxHash, finalAlreadyNotified.LogIndex); err != nil {
-		t.Fatalf("MarkWebhookSent failed: %v", err)
+	if err := MarkFinalNotified(db, finalAlreadyNotified.TxHash, finalAlreadyNotified.LogIndex); err != nil {
+		t.Fatalf("MarkFinalNotified failed: %v", err)
 	}
 
 	got, err := GetUnnotifiedFinalTransfers(db)
@@ -403,7 +403,7 @@ func TestGetUnnotifiedFinalTransfers(t *testing.T) {
 	}
 }
 
-func TestMarkWebhookSent_RemovesFromUnnotifiedList(t *testing.T) {
+func TestMarkFinalNotified_RemovesFromUnnotifiedList(t *testing.T) {
 	db := newTestDB(t)
 
 	tr := Transfer{
@@ -422,13 +422,134 @@ func TestMarkWebhookSent_RemovesFromUnnotifiedList(t *testing.T) {
 		t.Fatalf("got %d unnotified before marking sent, want 1", len(before))
 	}
 
-	if err := MarkWebhookSent(db, tr.TxHash, tr.LogIndex); err != nil {
-		t.Fatalf("MarkWebhookSent failed: %v", err)
+	if err := MarkFinalNotified(db, tr.TxHash, tr.LogIndex); err != nil {
+		t.Fatalf("MarkFinalNotified failed: %v", err)
 	}
 
 	after, err := GetUnnotifiedFinalTransfers(db)
 	if err != nil {
 		t.Fatalf("GetUnnotifiedFinalTransfers failed: %v", err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("got %d unnotified after marking sent, want 0", len(after))
+	}
+}
+
+// Same shape as TestMarkFinalized - MarkSafe follows the identical pattern,
+// just against is_safe/safeBlock instead of is_final/finalizedBlock.
+func TestMarkSafe(t *testing.T) {
+	db := newTestDB(t)
+
+	old := Transfer{
+		BlockNumber: 100, LogIndex: 0, TxHash: "0xold",
+		TokenSymbol: "USDC", From: "0xfrom", To: "0xto", RawAmount: "1", IsSafe: false,
+	}
+	recent := Transfer{
+		BlockNumber: 200, LogIndex: 0, TxHash: "0xrecent",
+		TokenSymbol: "USDC", From: "0xfrom", To: "0xto", RawAmount: "1", IsSafe: false,
+	}
+	if err := InsertTransfer(db, old); err != nil {
+		t.Fatalf("InsertTransfer(old) failed: %v", err)
+	}
+	if err := InsertTransfer(db, recent); err != nil {
+		t.Fatalf("InsertTransfer(recent) failed: %v", err)
+	}
+
+	flipped, err := MarkSafe(db, 150)
+	if err != nil {
+		t.Fatalf("MarkSafe failed: %v", err)
+	}
+	if flipped != 1 {
+		t.Fatalf("got %d rows flipped, want 1 (only the block-100 transfer)", flipped)
+	}
+
+	var isSafe bool
+	if err := db.QueryRow(`SELECT is_safe FROM transfers WHERE tx_hash = ?`, old.TxHash).Scan(&isSafe); err != nil {
+		t.Fatalf("reading back the old transfer failed: %v", err)
+	}
+	if !isSafe {
+		t.Fatal("block-100 transfer should now be marked safe")
+	}
+
+	if err := db.QueryRow(`SELECT is_safe FROM transfers WHERE tx_hash = ?`, recent.TxHash).Scan(&isSafe); err != nil {
+		t.Fatalf("reading back the recent transfer failed: %v", err)
+	}
+	if isSafe {
+		t.Fatal("block-200 transfer isn't safe yet and must not have been flipped")
+	}
+}
+
+func TestGetUnnotifiedSeenTransfers(t *testing.T) {
+	db := newTestDB(t)
+
+	unnotified := Transfer{
+		BlockNumber: 100, LogIndex: 0, TxHash: "0xunnotified",
+		TokenSymbol: "USDC", From: "0xfrom", To: "0xto", RawAmount: "1",
+	}
+	alreadyNotified := Transfer{
+		BlockNumber: 200, LogIndex: 0, TxHash: "0xalready-notified",
+		TokenSymbol: "USDC", From: "0xfrom", To: "0xto", RawAmount: "1",
+	}
+	if err := InsertTransfer(db, unnotified); err != nil {
+		t.Fatalf("InsertTransfer(unnotified) failed: %v", err)
+	}
+	if err := InsertTransfer(db, alreadyNotified); err != nil {
+		t.Fatalf("InsertTransfer(alreadyNotified) failed: %v", err)
+	}
+	// Unlike safe/final, seen has no status column - a transfer is seen the
+	// moment it exists. So it qualifies for the unnotified list immediately,
+	// with no MarkSeen equivalent needed before marking it notified.
+	if err := MarkSeenNotified(db, alreadyNotified.TxHash, alreadyNotified.LogIndex); err != nil {
+		t.Fatalf("MarkSeenNotified failed: %v", err)
+	}
+
+	got, err := GetUnnotifiedSeenTransfers(db)
+	if err != nil {
+		t.Fatalf("GetUnnotifiedSeenTransfers failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d transfers, want 1 (only the unnotified one)", len(got))
+	}
+	if got[0].TxHash != unnotified.TxHash {
+		t.Fatalf("got tx hash %q, want %q", got[0].TxHash, unnotified.TxHash)
+	}
+}
+
+func TestGetUnnotifiedSafeTransfers(t *testing.T) {
+	db := newTestDB(t)
+
+	safeUnnotified := Transfer{
+		BlockNumber: 100, LogIndex: 0, TxHash: "0xsafe-unnotified",
+		TokenSymbol: "USDC", From: "0xfrom", To: "0xto", RawAmount: "1", IsSafe: true,
+	}
+	notSafe := Transfer{
+		BlockNumber: 200, LogIndex: 0, TxHash: "0xnot-safe",
+		TokenSymbol: "USDC", From: "0xfrom", To: "0xto", RawAmount: "1", IsSafe: false,
+	}
+	if err := InsertTransfer(db, safeUnnotified); err != nil {
+		t.Fatalf("InsertTransfer(safeUnnotified) failed: %v", err)
+	}
+	if err := InsertTransfer(db, notSafe); err != nil {
+		t.Fatalf("InsertTransfer(notSafe) failed: %v", err)
+	}
+
+	got, err := GetUnnotifiedSafeTransfers(db)
+	if err != nil {
+		t.Fatalf("GetUnnotifiedSafeTransfers failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d transfers, want 1 (only the safe-and-unnotified one)", len(got))
+	}
+	if got[0].TxHash != safeUnnotified.TxHash {
+		t.Fatalf("got tx hash %q, want %q", got[0].TxHash, safeUnnotified.TxHash)
+	}
+
+	if err := MarkSafeNotified(db, safeUnnotified.TxHash, safeUnnotified.LogIndex); err != nil {
+		t.Fatalf("MarkSafeNotified failed: %v", err)
+	}
+	after, err := GetUnnotifiedSafeTransfers(db)
+	if err != nil {
+		t.Fatalf("GetUnnotifiedSafeTransfers failed: %v", err)
 	}
 	if len(after) != 0 {
 		t.Fatalf("got %d unnotified after marking sent, want 0", len(after))

@@ -18,10 +18,10 @@ type TokenInfo struct {
 	Decimals int64
 }
 
-// finalizedBlock is passed in rather than fetched here: the caller already
-// needs it once per polling tick, and looking it up again per block was an
-// extra RPC round-trip for a value that barely moves.
-func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint64, tokens map[common.Address]TokenInfo, db *sql.DB, finalizedBlock uint64) error {
+// safeBlock/finalizedBlock are passed in rather than fetched here: the
+// caller already needs them once per polling tick, and looking them up
+// again per block was an extra RPC round-trip for values that barely move.
+func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint64, tokens map[common.Address]TokenInfo, db *sql.DB, safeBlock, finalizedBlock uint64) error {
 	transferSig := crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
 
 	addresses := make([]common.Address, 0, len(tokens))
@@ -44,6 +44,7 @@ func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint
 	for _, vLog := range logs {
 		info := tokens[vLog.Address] // whichever token actually emitted this log, not a flat assumption
 
+		safe := vLog.BlockNumber <= safeBlock
 		final := vLog.BlockNumber <= finalizedBlock
 
 		from := common.HexToAddress(vLog.Topics[1].Hex())
@@ -59,6 +60,7 @@ func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint
 			From:        from.Hex(),
 			To:          to.Hex(),
 			RawAmount:   amount.String(),
+			IsSafe:      safe,
 			IsFinal:     final,
 		}
 
@@ -73,6 +75,7 @@ func CheckTransfers(client *ethclient.Client, ctx context.Context, blockNum uint
 			"token", t.TokenSymbol,
 			"from", t.From,
 			"to", t.To,
+			"safe", t.IsSafe,
 			"final", t.IsFinal,
 		)
 	}

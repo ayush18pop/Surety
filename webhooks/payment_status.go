@@ -18,13 +18,28 @@ import (
 // unresponsive receiver could otherwise hang a caller indefinitely.
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
-// PaymentStatusPayload is the JSON body sent when a transfer reaches final
-// status. Status is always "final" for now - that's the one transition
-// Surety currently detects (see storage.MarkFinalized) - but it's a named
-// field rather than an implicit assumption, so a future status doesn't
-// require breaking the payload shape.
+// Status is one of the three real chain states a transfer passes through -
+// each maps directly to an Ethereum RPC block tag, not a guessed depth.
+// StatusSeen has no confirmation guarantee at all (the "latest" tag - could
+// still be reorg'd out). StatusSafe means justified by a supermajority of
+// attestations this epoch (the "safe" tag) - very unlikely to revert, but
+// not a hard guarantee. StatusFinal means cryptoeconomically irreversible
+// (the "finalized" tag).
+type Status string
+
+const (
+	StatusSeen  Status = "seen"
+	StatusSafe  Status = "safe"
+	StatusFinal Status = "final"
+)
+
+// PaymentStatusPayload is the JSON body sent on each status transition a
+// transfer passes through. Status is a named field rather than an implicit
+// assumption specifically so a receiver can tell which of the three events
+// this is and decide their own risk tolerance - some act on "safe", others
+// wait for "final".
 type PaymentStatusPayload struct {
-	Status      string `json:"status"`
+	Status      Status `json:"status"`
 	BlockNumber uint64 `json:"block_number"`
 	TxHash      string `json:"tx_hash"`
 	LogIndex    uint   `json:"log_index"`
@@ -34,14 +49,14 @@ type PaymentStatusPayload struct {
 	Amount      string `json:"amount"`
 }
 
-// SendPaymentStatus notifies url that a transfer has reached final status.
-// The body is signed with HMAC-SHA256 using secret, carried in the
+// SendPaymentStatus notifies url that a transfer has reached the given
+// status. The body is signed with HMAC-SHA256 using secret, carried in the
 // X-Signature header, so the receiver can verify the payload genuinely came
 // from Surety and wasn't altered in transit - the same pattern Stripe,
 // GitHub, and most webhook providers use.
-func SendPaymentStatus(url, secret string, t storage.Transfer) error {
+func SendPaymentStatus(url, secret string, t storage.Transfer, status Status) error {
 	payload := PaymentStatusPayload{
-		Status:      "final",
+		Status:      status,
 		BlockNumber: t.BlockNumber,
 		TxHash:      t.TxHash,
 		LogIndex:    t.LogIndex,

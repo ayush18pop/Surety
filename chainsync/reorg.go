@@ -23,6 +23,20 @@ func GetFinalizedBlock(client *ethclient.Client, ctx context.Context) (uint64, e
 	return header.Number.Uint64(), nil
 }
 
+// GetSafeBlock returns the highest block number Ethereum's consensus layer
+// considers "safe" - justified by a supermajority of validator attestations
+// in the current epoch. Weaker than finalized (not a hard cryptoeconomic
+// guarantee), but a real consensus-layer fact from the "safe" RPC tag, not a
+// guessed confirmation depth either. Same pattern as GetFinalizedBlock,
+// pointed at rpc.SafeBlockNumber (-4) instead.
+func GetSafeBlock(client *ethclient.Client, ctx context.Context) (uint64, error) {
+	header, err := client.HeaderByNumber(ctx, big.NewInt(rpc.SafeBlockNumber.Int64()))
+	if err != nil {
+		return 0, err
+	}
+	return header.Number.Uint64(), nil
+}
+
 // HeaderFetcher is the one method FindForkPoint actually calls on a chain
 // client. Depending on this instead of the concrete *ethclient.Client is what
 // makes FindForkPoint testable: a real mainnet reorg can't be triggered on

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"os"
@@ -30,6 +31,27 @@ var watchedTokens = map[common.Address]tokenwatch.TokenInfo{
 func fatal(msg string, err error) {
 	slog.Error(msg, "error", err)
 	os.Exit(1)
+}
+
+// deliverWebhooks sends one status's worth of pending notifications and
+// marks each one sent on success. One helper instead of three near-identical
+// copies in main() - seen/safe/final only differ in which query/mark
+// functions and which Status value get passed in, not in how delivery works.
+func deliverWebhooks(db *sql.DB, url, secret string, status webhooks.Status, pending []storage.Transfer, markSent func(*sql.DB, string, uint) error) {
+	for _, t := range pending {
+		if err := webhooks.SendPaymentStatus(url, secret, t, status); err != nil {
+			// Not fatal, and left unmarked: the matching GetUnnotified*
+			// function will return this same transfer again next tick, so a
+			// transient failure (receiver briefly down, network blip)
+			// retries on its own instead of losing the notification.
+			slog.Error("sending webhook, retrying next tick", "status", status, "tx_hash", t.TxHash, "log_index", t.LogIndex, "error", err)
+			continue
+		}
+		if err := markSent(db, t.TxHash, t.LogIndex); err != nil {
+			fatal("marking webhook sent", err)
+		}
+		slog.Info("sent payment status webhook", "status", status, "tx_hash", t.TxHash, "log_index", t.LogIndex)
+	}
 }
 
 func main() {
@@ -102,6 +124,10 @@ func main() {
 			continue
 		}
 
+		safeBlock, err := chainsync.GetSafeBlock(client, ctx)
+		if err != nil {
+			fatal("fetching safe block", err)
+		}
 		finalizedBlock, err := chainsync.GetFinalizedBlock(client, ctx)
 		if err != nil {
 			fatal("fetching finalized block", err)
@@ -145,7 +171,7 @@ func main() {
 				// that block permanently. Leaving the checkpoint where it is
 				// means the next tick retries this same block, which the
 				// idempotent inserts make safe.
-				if err := tokenwatch.CheckTransfers(client, ctx, blockNum, watchedTokens, db, finalizedBlock); err != nil {
+				if err := tokenwatch.CheckTransfers(client, ctx, blockNum, watchedTokens, db, safeBlock, finalizedBlock); err != nil {
 					slog.Error("checking transfers, retrying next tick", "block_number", blockNum, "error", err)
 					break
 				}
@@ -165,37 +191,43 @@ func main() {
 			fatal("pruning finalized blocks", err)
 		}
 
-		// is_final is only ever set once, when a transfer is first decoded -
-		// nothing else revisits it. Without this sweep, a transfer seen
-		// before it was finalized would stay marked final=false forever,
-		// even long after it's genuinely settled.
-		flipped, err := storage.MarkFinalized(db, finalizedBlock)
+		// is_safe/is_final are only ever set once, when a transfer is first
+		// decoded - nothing else revisits them. Without these sweeps, a
+		// transfer seen before it was safe/finalized would stay stamped
+		// false forever, even long after it genuinely caught up.
+		safeFlipped, err := storage.MarkSafe(db, safeBlock)
+		if err != nil {
+			fatal("marking transfers safe", err)
+		}
+		if safeFlipped > 0 {
+			slog.Info("marked transfers safe", "count", safeFlipped)
+		}
+		finalFlipped, err := storage.MarkFinalized(db, finalizedBlock)
 		if err != nil {
 			fatal("marking transfers final", err)
 		}
-		if flipped > 0 {
-			slog.Info("marked transfers final", "count", flipped)
+		if finalFlipped > 0 {
+			slog.Info("marked transfers final", "count", finalFlipped)
 		}
 
 		if webhookURL != "" {
-			pending, err := storage.GetUnnotifiedFinalTransfers(db)
+			seen, err := storage.GetUnnotifiedSeenTransfers(db)
+			if err != nil {
+				fatal("loading unnotified seen transfers", err)
+			}
+			deliverWebhooks(db, webhookURL, webhookSecret, webhooks.StatusSeen, seen, storage.MarkSeenNotified)
+
+			safe, err := storage.GetUnnotifiedSafeTransfers(db)
+			if err != nil {
+				fatal("loading unnotified safe transfers", err)
+			}
+			deliverWebhooks(db, webhookURL, webhookSecret, webhooks.StatusSafe, safe, storage.MarkSafeNotified)
+
+			final, err := storage.GetUnnotifiedFinalTransfers(db)
 			if err != nil {
 				fatal("loading unnotified final transfers", err)
 			}
-			for _, t := range pending {
-				if err := webhooks.SendPaymentStatus(webhookURL, webhookSecret, t); err != nil {
-					// Not fatal, and left unmarked: GetUnnotifiedFinalTransfers
-					// will return this same transfer again next tick, so a
-					// transient failure (receiver briefly down, network blip)
-					// retries on its own instead of losing the notification.
-					slog.Error("sending webhook, retrying next tick", "tx_hash", t.TxHash, "log_index", t.LogIndex, "error", err)
-					continue
-				}
-				if err := storage.MarkWebhookSent(db, t.TxHash, t.LogIndex); err != nil {
-					fatal("marking webhook sent", err)
-				}
-				slog.Info("sent payment status webhook", "tx_hash", t.TxHash, "log_index", t.LogIndex)
-			}
+			deliverWebhooks(db, webhookURL, webhookSecret, webhooks.StatusFinal, final, storage.MarkFinalNotified)
 		}
 
 		time.Sleep(12 * time.Second)

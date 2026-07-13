@@ -25,6 +25,13 @@ func Open(path string) (*sql.DB, error) {
 // transfers: UNIQUE(tx_hash, log_index) is the same idempotency key
 // established earlier in the plan - the pair that actually identifies one
 // transfer event uniquely, since a single tx can contain many transfer logs.
+// is_safe/is_final track the chain's own "safe" and "finalized" RPC tags,
+// each set once at insert time and corrected later by a sweep (MarkSafe,
+// MarkFinalized). "Seen" has no boolean of its own - every row is seen the
+// moment it exists. The three *_notified columns track webhook delivery
+// separately per status, since settlement status and delivery status are
+// different questions - a transfer can be final without anyone having been
+// told yet.
 //
 // blocks: one hash per height, so a reorg can be traced backwards to the
 // fork point. Only heights above the finalized block need to be kept -
@@ -50,8 +57,11 @@ func InitSchema(db *sql.DB) error {
 			from_address TEXT NOT NULL,
 			to_address TEXT NOT NULL,
 			raw_amount TEXT NOT NULL,
+			is_safe INTEGER NOT NULL DEFAULT 0,
 			is_final INTEGER NOT NULL,
-			webhook_sent INTEGER NOT NULL DEFAULT 0,
+			seen_notified INTEGER NOT NULL DEFAULT 0,
+			safe_notified INTEGER NOT NULL DEFAULT 0,
+			final_notified INTEGER NOT NULL DEFAULT 0,
 			UNIQUE(tx_hash, log_index)
 		);
 
@@ -80,6 +90,7 @@ type Transfer struct {
 	From        string
 	To          string
 	RawAmount   string
+	IsSafe      bool
 	IsFinal     bool
 }
 
@@ -89,9 +100,9 @@ type Transfer struct {
 // second pass would be a spurious error, not a real one.
 func InsertTransfer(db *sql.DB, t Transfer) error {
 	_, err := db.Exec(`
-		INSERT OR REPLACE INTO transfers (block_number, log_index, tx_hash, token_symbol, from_address, to_address, raw_amount, is_final)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.BlockNumber, t.LogIndex, t.TxHash, t.TokenSymbol, t.From, t.To, t.RawAmount, t.IsFinal)
+		INSERT OR REPLACE INTO transfers (block_number, log_index, tx_hash, token_symbol, from_address, to_address, raw_amount, is_safe, is_final)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.BlockNumber, t.LogIndex, t.TxHash, t.TokenSymbol, t.From, t.To, t.RawAmount, t.IsSafe, t.IsFinal)
 	return err
 }
 
@@ -191,6 +202,18 @@ func PruneBlocksBelow(db *sql.DB, finalizedBlock uint64) error {
 	return err
 }
 
+// MarkSafe flips is_safe from false to true for every transfer whose block
+// has caught up to safeBlock. Same reasoning and same shape as MarkFinalized
+// below - is_safe is only ever set once, at decode time, so without this
+// sweep a transfer seen before it was safe would stay stamped false forever.
+func MarkSafe(db *sql.DB, safeBlock uint64) (int64, error) {
+	res, err := db.Exec(`UPDATE transfers SET is_safe = 1 WHERE is_safe = 0 AND block_number <= ?`, safeBlock)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // MarkFinalized flips is_final from false to true for every transfer whose
 // block has caught up to finalizedBlock. is_final is only ever set once, at
 // decode time - nothing else revisits it - so without a periodic sweep like
@@ -204,25 +227,12 @@ func MarkFinalized(db *sql.DB, finalizedBlock uint64) (int64, error) {
 	return res.RowsAffected()
 }
 
-// GetUnnotifiedFinalTransfers returns every final transfer that hasn't had
-// a webhook sent for it yet. is_final alone isn't enough to know what to
-// notify about - it doesn't distinguish "already told someone" from "never
-// told anyone" - webhook_sent is the piece that tracks delivery separately
-// from settlement status.
-func GetUnnotifiedFinalTransfers(db *sql.DB) ([]Transfer, error) {
-	rows, err := db.Query(`
-		SELECT block_number, log_index, tx_hash, token_symbol, from_address, to_address, raw_amount, is_final
-		FROM transfers WHERE is_final = 1 AND webhook_sent = 0
-	`)
-	if err != nil {
-		return nil, err
-	}
+func scanTransfers(rows *sql.Rows) ([]Transfer, error) {
 	defer rows.Close()
-
 	var transfers []Transfer
 	for rows.Next() {
 		var t Transfer
-		if err := rows.Scan(&t.BlockNumber, &t.LogIndex, &t.TxHash, &t.TokenSymbol, &t.From, &t.To, &t.RawAmount, &t.IsFinal); err != nil {
+		if err := rows.Scan(&t.BlockNumber, &t.LogIndex, &t.TxHash, &t.TokenSymbol, &t.From, &t.To, &t.RawAmount, &t.IsSafe, &t.IsFinal); err != nil {
 			return nil, err
 		}
 		transfers = append(transfers, t)
@@ -230,12 +240,60 @@ func GetUnnotifiedFinalTransfers(db *sql.DB) ([]Transfer, error) {
 	return transfers, rows.Err()
 }
 
-// MarkWebhookSent records that a transfer's webhook was successfully
-// delivered, so GetUnnotifiedFinalTransfers doesn't return it again on the
-// next poll tick. tx_hash + log_index identifies the row, the same
-// composite key that already uniquely identifies a transfer everywhere else
+const transferColumns = `block_number, log_index, tx_hash, token_symbol, from_address, to_address, raw_amount, is_safe, is_final`
+
+// GetUnnotifiedSeenTransfers returns every transfer that hasn't had a "seen"
+// webhook sent yet. Unlike safe/final, seen has no status column to check -
+// every row is seen the moment it exists - so this is really just "not yet
+// notified about being seen at all."
+func GetUnnotifiedSeenTransfers(db *sql.DB) ([]Transfer, error) {
+	rows, err := db.Query(`SELECT ` + transferColumns + ` FROM transfers WHERE seen_notified = 0`)
+	if err != nil {
+		return nil, err
+	}
+	return scanTransfers(rows)
+}
+
+// GetUnnotifiedSafeTransfers returns every safe transfer that hasn't had a
+// "safe" webhook sent yet - is_safe alone doesn't distinguish "already told
+// someone" from "never told anyone."
+func GetUnnotifiedSafeTransfers(db *sql.DB) ([]Transfer, error) {
+	rows, err := db.Query(`SELECT ` + transferColumns + ` FROM transfers WHERE is_safe = 1 AND safe_notified = 0`)
+	if err != nil {
+		return nil, err
+	}
+	return scanTransfers(rows)
+}
+
+// GetUnnotifiedFinalTransfers returns every final transfer that hasn't had
+// a "final" webhook sent yet. is_final alone isn't enough to know what to
+// notify about - it doesn't distinguish "already told someone" from "never
+// told anyone" - final_notified is the piece that tracks delivery separately
+// from settlement status.
+func GetUnnotifiedFinalTransfers(db *sql.DB) ([]Transfer, error) {
+	rows, err := db.Query(`SELECT ` + transferColumns + ` FROM transfers WHERE is_final = 1 AND final_notified = 0`)
+	if err != nil {
+		return nil, err
+	}
+	return scanTransfers(rows)
+}
+
+// MarkSeenNotified, MarkSafeNotified, and MarkFinalNotified each record that
+// a transfer's webhook for that specific status was delivered, so the
+// matching GetUnnotified* function doesn't return it again. tx_hash +
+// log_index identifies the row, the same composite key used everywhere else
 // in this package.
-func MarkWebhookSent(db *sql.DB, txHash string, logIndex uint) error {
-	_, err := db.Exec(`UPDATE transfers SET webhook_sent = 1 WHERE tx_hash = ? AND log_index = ?`, txHash, logIndex)
+func MarkSeenNotified(db *sql.DB, txHash string, logIndex uint) error {
+	_, err := db.Exec(`UPDATE transfers SET seen_notified = 1 WHERE tx_hash = ? AND log_index = ?`, txHash, logIndex)
+	return err
+}
+
+func MarkSafeNotified(db *sql.DB, txHash string, logIndex uint) error {
+	_, err := db.Exec(`UPDATE transfers SET safe_notified = 1 WHERE tx_hash = ? AND log_index = ?`, txHash, logIndex)
+	return err
+}
+
+func MarkFinalNotified(db *sql.DB, txHash string, logIndex uint) error {
+	_, err := db.Exec(`UPDATE transfers SET final_notified = 1 WHERE tx_hash = ? AND log_index = ?`, txHash, logIndex)
 	return err
 }
