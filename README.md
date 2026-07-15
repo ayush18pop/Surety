@@ -3,7 +3,7 @@
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![Status](https://img.shields.io/badge/status-early%20%26%20building%20in%20public-yellow)](ROADMAP.md)
 [![Self-Hosted](https://img.shields.io/badge/deployment-self--hosted-blue)](#why-self-hosted-not-a-hosted-api)
-[![License](https://img.shields.io/badge/license-MIT%20(pending)-lightgrey)](#license)
+[![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 **The third option for stablecoin payment settlement.** Not "build reorg-safe finality tracking yourself" (tedious, easy to get subtly wrong). Not "trust a hosted API with your settlement-critical data" (fast, but now someone else's uptime is your uptime). Surety is that correctness work — done, tested, self-hosted — for teams who want to own their infra without building it from zero.
 
@@ -25,13 +25,13 @@ See [ROADMAP.md](ROADMAP.md) for known gaps and what's planned next — the quer
 
 ## Why stablecoins specifically, not any token
 
-With a stablecoin, the amount transferred *is* the value — no price oracle, no volatility between "seen" and "final." That's what makes "this payment is safe to act on" a guarantee you can actually make. The moment you allow volatile assets, you've added a second, unrelated problem (price risk, oracles) that has nothing to do with settlement correctness. So this project stays narrow on purpose.
+With a stablecoin, the amount transferred _is_ the value — no price oracle, no volatility between "seen" and "final." That's what makes "this payment is safe to act on" a guarantee you can actually make. The moment you allow volatile assets, you've added a second, unrelated problem (price risk, oracles) that has nothing to do with settlement correctness. So this project stays narrow on purpose.
 
 ## Why self-hosted, not a hosted API
 
 Building payment-settlement infra yourself means getting reorg detection and recovery, real finality (not confirmation-counting), and crash-safe atomic writes right — tedious, easy-to-get-subtly-wrong work, the kind that even teams processing billions of transactions across 100+ chains write engineering blog posts about because it's genuinely hard to do correctly. Using a hosted indexer (Alchemy, Moralis, etc.) skips that work, but now the thing telling you a payment is safe to act on is a third party's uptime, pricing, and roadmap.
 
-This tool never generates or holds private keys — it *registers* addresses you already control and watches them. No custody, no key management, no liability for someone else's funds. It's a watcher/notifier, deliberately scoped, not a wallet.
+This tool never generates or holds private keys — it _registers_ addresses you already control and watches them. No custody, no key management, no liability for someone else's funds. It's a watcher/notifier, deliberately scoped, not a wallet.
 
 ## Installation
 
@@ -74,7 +74,7 @@ This is early and actively changing. [ROADMAP.md](ROADMAP.md) tracks what's done
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE) — self-hostable, no restrictions on running this as part of your own infrastructure.
 
 ---
 
